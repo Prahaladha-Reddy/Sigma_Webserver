@@ -20,3 +20,4 @@ class Process(BaseModel):
     files: Optional[List[str]] = None
     status: str
     num_slides: int 
+    user_id: str

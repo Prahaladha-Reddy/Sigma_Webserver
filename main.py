@@ -55,6 +55,7 @@ class ChatRequest(BaseModel):
     message: str
     file_ids: List[str] = []
     num_slides: int = 15
+    user_id: str
 
 class DownloadUrlRequest(BaseModel):
     file_url: str  
@@ -121,55 +122,52 @@ async def generate_download_url(request: DownloadUrlRequest):
         print(f"Error generating download URL: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @app.post("/chat")
 async def chat_endpoint(request: ChatRequest):
     try:
-        response_text = f"I received your message: '{request.message}'."
+        process_id = str(uuid.uuid4())
+        current_time = datetime.now(timezone.utc).isoformat()
 
-        if request.file_ids:
-            response_text += f" Processing {len(request.file_ids)} file(s) in the background..."
-            process_id = str(uuid.uuid4())
+        Message_content = SQSMessage(
+            file_ids=request.file_ids if request.file_ids else [],
+            process_id=process_id,
+            user_message=request.message,
+            timestamp=current_time,
+            num_slides=request.num_slides,
+        )
 
-            current_time = datetime.now(timezone.utc).isoformat()
+        sqs_response = sqs_client.send_message(
+            QueueUrl=SQS_QUEUE_URL,
+            MessageBody=Message_content.model_dump_json(),
+            MessageAttributes={
+                "MessageType": {
+                    "StringValue": "file_processing", 
+                    "DataType": "String",
+                }
+            },
+        )
 
-            Message_content = SQSMessage(
-                file_ids=request.file_ids,
-                process_id=process_id,
-                user_message=request.message,
-                timestamp=current_time,
-                num_slides=request.num_slides,
-            )
+        process = Process(
+            process_id=process_id,
+            user_request=request.message,
+            files=request.file_ids if request.file_ids else [],
+            status="queued",
+            num_slides=request.num_slides,
+            user_id=request.user_id
+        )
 
-            sqs_response = sqs_client.send_message(
-                QueueUrl=SQS_QUEUE_URL,
-                MessageBody=Message_content.model_dump_json(),
-                MessageAttributes={
-                    "MessageType": {
-                        "StringValue": "file_processing",
-                        "DataType": "String",
-                    }
-                },
-            )
+        supabase.table(Config.Process_table_name).insert(
+            process.model_dump()
+        ).execute()
 
-            process = Process(
-                process_id=process_id,
-                user_request=request.message,
-                files=request.file_ids,
-                status="queued",
-                num_slides=request.num_slides,
-            )
-
-            supabase.table(Config.Process_table_name).insert(
-                process.model_dump()
-            ).execute()
-
-            print(f"Message sent to SQS: {sqs_response['MessageId']}")
+        print(f"Job sent to SQS: {sqs_response['MessageId']}")
 
         return {
-            "response": response_text,
-            "processing_status": "queued" if request.file_ids else "complete",
+            "response": "Job started successfully",
+            "process_id": process_id, 
+            "processing_status": "queued"
         }
+
 
     except Exception as e:
         print(f"Server Error: {str(e)}")
